@@ -3,7 +3,7 @@
 <h2>COMI: Coarse-to-fine Context Compression via Marginal Information Gain</h2>
 
 <p>
-  <a href="https://scholar.google.com/citations?user=v7oMH04AAAAJ&hl=zh-CN">Jiwei Tang</a><sup>1</sup> · 
+  <a href="https://scholar.google.com/citations?user=v7oMH04AAAAJ&hl=zh-CN">Jiwei Tang</a><sup>1,2</sup> · 
   Shilei Liu<sup>2</sup> · 
   Zhicheng Zhang<sup>1</sup> · 
   Yujin Yuan<sup>2</sup> · 
@@ -38,7 +38,8 @@ This is the official implementation for our **ICLR 2026** paper "COMI: Coarse-to
 </div>
 
 ## Release
-- [02/12] Initial Release. The models and code for training and inference are coming soon!
+- [02/12] Initial release of the paper and project page.
+- [06/29] Added the current training, inference, evaluation, and test workflow.
 
 ## Motivation
 Existing task-aware compression methods focus solely on relevance to the query, ignoring semantic redundancy among retained tokens—leading to accumulation of *"relevant but redundant"* content that misleads LLMs.
@@ -59,6 +60,95 @@ COMI achieves superiority performance across QA and summarization tasks under hi
 <div align="center">
   <img src="./imgs/result.png" width="85%" height="auto" />
 </div>
+
+## Implementation Overview
+
+The current implementation uses an encoder-decoder architecture built from the same causal language model:
+
+1. The encoder converts the long context and query into hidden representations.
+2. Coarse-grained MIG scoring reallocates the number of retained units among context groups according to query relevance and inter-group redundancy.
+3. Fine-grained MIG-weighted merging compresses tokens inside each group while reducing redundant information.
+4. An optional LSA memory-fusion module transforms the compressed memories before they are consumed by the decoder.
+5. The decoder generates the answer from the compressed memories and query. The default training setup fully tunes the encoder and LSA module while applying LoRA to the decoder.
+
+`merge_size` controls the approximate compression ratio: one memory representation is produced for each group of tokens. The implementation also supports randomly sampling from several merge sizes during training.
+
+## Environment Setup
+
+The project is designed for NVIDIA GPUs, BF16, and FlashAttention 2. A reference environment matching the current GMSA stack is:
+
+```bash
+conda create -n ram python=3.10 -y
+conda activate ram
+
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu118
+pip install \
+  transformers==5.1.0 datasets==4.3.0 peft==0.13.0 \
+  deepspeed==0.18.7 accelerate==1.13.0 safetensors==0.7.0 \
+pip install flash-attn==2.6.3 --no-build-isolation
+```
+
+## Data Format
+
+Training and evaluation data are JSONL files with one object per line:
+
+```json
+{
+  "input": "Long context text...",
+  "prompt": "Question text...",
+  "answer": ["reference answer", "optional alternative answer"]
+}
+```
+
+- `input`: long source context.
+- `prompt`: task query or question.
+- `answer`: either a string or a non-empty list of reference strings. Training uses the first reference; evaluation scores against the best matching reference.
+
+Override `TRAIN_FILE` and `TEST_FILE` when using another location.
+
+## Training
+
+Run the training script:
+
+```bash
+bash train.sh
+```
+
+`train.sh` is configured as a quick debug launcher: it passes `--debug_data True`.
+
+
+## Inference and Evaluation
+
+Set `RESTORE_FROM` to a checkpoint directory or a supported checkpoint file (`model.safetensors`, `adapter_model.safetensors`, or `pytorch_model.bin`):
+
+```bash
+bash test.sh
+```
+
+Multi-GPU evaluation uses `NUM_GPUS` and splits samples across ranks.
+
+Results are written under `${OUTPUT_DIR}/eval_result/`:
+
+- `nq_inference_results_<sample-count|all>_<merge-size>.jsonl`: context, question, prediction, references, and sample identifier.
+- `nq_inference_metrics_<sample-count|all>_<merge-size>.json`: total sample count, average EM, and average F1.
+
+## Main Launcher Variables
+
+| Variable | Training default | Description |
+| --- | --- | --- |
+| `MODEL_NAME` | `Qwen/Qwen3-4B-Instruct-2507` | Hugging Face model path or identifier. |
+| `TRAIN_FILE` | `/path/to/train.jsonl` | Training JSONL. |
+| `TEST_FILE` | `/path/to/test.jsonl` | Evaluation JSONL. |
+| `OUTPUT_DIR` | `./output` | `./output` | Checkpoint and evaluation root. |
+| `RESTORE_FROM` | — | Checkpoint directory/file; set this explicitly for normal evaluation. |
+| `MERGE_SIZE` | `16` | Tokens represented by one compressed memory unit. |
+| `SEGMENT_SIZE` | `30000` | Long-context segment size. |
+| `NUM_GPUS` | `2` | Number of `torchrun` workers. |
+| `MAX_STEPS` | `10000` | Maximum training steps. |
+| `NUM_SAMPLES` | `100` | Evaluation sample count. |
+
+Additional model switches such as `--coarse_grained_on`, `--fine_grained_on`, `--redun_coarse`, `--redun_fine`, LoRA targets, and trainability controls can be passed to `train.sh`.
+
 
 ## BibTeX
 If you find our repo helpful, please consider leaving a star and cite our paper
